@@ -2,6 +2,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#define RESULT_OK 1
+#define RESULT_HALT 0
+#define RESULT_FAIL_UNKNOWN_OPCODE -1
+#define RESULT_FAIL_EMPTY_STACK -2
+#define RESULT_FAIL_STACK_OVERFLOW -3
+
+#define len(x) (sizeof(x) / sizeof((x)[0]))
+
 struct chip8_t
 {
     uint8_t mem[4096];
@@ -14,6 +22,55 @@ struct chip8_t
     uint8_t display[32][64];
     uint8_t keys[16];
 };
+
+uint16_t get_current_op(struct chip8_t *chip8)
+{
+    return (uint16_t)(chip8->mem[chip8->pc]) << 8 | (uint16_t)(chip8->mem[chip8->pc + 1]);
+}
+
+void clr(struct chip8_t *chip8)
+{
+    memset(chip8->display, 0, sizeof chip8->display);
+}
+
+int ret(struct chip8_t *chip8)
+{
+    if (chip8->sp == 0)
+    {
+        return RESULT_FAIL_EMPTY_STACK;
+    }
+
+    chip8->sp--;
+    chip8->pc = chip8->stack[chip8->sp];
+
+    return RESULT_OK;
+}
+
+int jump(struct chip8_t *chip8, uint16_t nnn)
+{
+    if (chip8->pc - 2 == nnn)
+    {
+        return RESULT_HALT;
+    }
+
+    chip8->pc = nnn;
+    return RESULT_OK;
+}
+
+void assign(struct chip8_t *chip8, uint8_t x, uint16_t nn)
+{
+    chip8->V[x] = nn;
+}
+
+void increment(struct chip8_t *chip8, uint8_t x, uint16_t nn)
+{
+    chip8->V[x] += nn;
+}
+
+void set_image(struct chip8_t *chip8, uint16_t nnn)
+{
+    chip8->I = nnn;
+}
 
 void draw(struct chip8_t *chip8, uint8_t vx, uint8_t vy, uint8_t n)
 {
@@ -40,6 +97,123 @@ void draw(struct chip8_t *chip8, uint8_t vx, uint8_t vy, uint8_t n)
             chip8->display[y][x] ^= bit;
         }
     }
+}
+
+int call(struct chip8_t *chip8, uint16_t nnn)
+{
+    if (chip8->sp >= len(chip8->stack))
+    {
+        return RESULT_FAIL_STACK_OVERFLOW;
+    }
+    chip8->stack[chip8->sp] = chip8->pc;
+    chip8->sp++;
+    chip8->pc = nnn;
+
+    return RESULT_OK;
+}
+
+void skip_next_eq_nn(struct chip8_t *chip8, uint8_t x, uint16_t nn)
+{
+    if (chip8->V[x] == nn)
+    {
+        chip8->pc += 2;
+    }
+}
+
+void skip_next_neq_nn(struct chip8_t *chip8, uint8_t x, uint16_t nn)
+{
+    if (chip8->V[x] != nn)
+    {
+        chip8->pc += 2;
+    }
+}
+
+void skip_next_eq_xy(struct chip8_t *chip8, uint8_t x, uint8_t y)
+{
+    if (chip8->V[x] == chip8->V[y])
+    {
+        chip8->pc += 2;
+    }
+}
+
+void skip_next_neq_xy(struct chip8_t *chip8, uint8_t x, uint8_t y)
+{
+    if (chip8->V[x] != chip8->V[y])
+    {
+        chip8->pc += 2;
+    }
+}
+
+int maths(struct chip8_t *chip8, uint8_t x, uint8_t y, uint8_t n)
+{
+    switch (n)
+    {
+    case 0x0:
+    {
+        chip8->V[x] = chip8->V[y];
+        break;
+    }
+
+    case 0x1:
+    {
+        chip8->V[x] |= chip8->V[y]; // quirk
+        break;
+    }
+    case 0x2:
+    {
+        chip8->V[x] &= chip8->V[y]; // quirk
+        break;
+    }
+    case 0x3:
+    {
+        chip8->V[x] ^= chip8->V[y]; // quirk
+        break;
+    }
+    case 0x4:
+    {
+        int sum = chip8->V[x] + chip8->V[y];
+        chip8->V[x] = sum;
+        chip8->V[0xF] = sum > 0xFF;
+        break;
+    }
+    case 0x5:
+    {
+        uint8_t sub = chip8->V[x] - chip8->V[y];
+        uint8_t vf = chip8->V[x] >= chip8->V[y];
+        chip8->V[x] = sub;
+        chip8->V[0xF] = vf;
+        break;
+    }
+    case 0x6:
+    {
+        uint8_t shifted_bit = chip8->V[x] & 1;
+        uint8_t res = chip8->V[x] >> 1;
+        chip8->V[x] = res;
+        chip8->V[0xF] = shifted_bit; // quirk
+        break;
+    }
+    case 0x7:
+    {
+        uint8_t sub = chip8->V[y] - chip8->V[x];
+        uint8_t vf = chip8->V[y] >= chip8->V[x];
+        chip8->V[x] = sub;
+        chip8->V[0xF] = vf;
+        break;
+    }
+    case 0xE:
+    {
+        uint8_t shifted_bit = (chip8->V[x] >> 7) & 1;
+        uint8_t res = chip8->V[x] << 1;
+        chip8->V[x] = res;
+        chip8->V[0xF] = shifted_bit; // quirk
+        break;
+    }
+
+    default:
+        return RESULT_FAIL_UNKNOWN_OPCODE;
+    }
+
+    return RESULT_OK;
 }
 
 void display(struct chip8_t *chip8)
@@ -110,9 +284,9 @@ int main(int argc, char **argv)
     }
 
     int running = 1;
-    while (running)
+    while (running == RESULT_OK)
     {
-        uint16_t op = (uint16_t)(chip8.mem[chip8.pc]) << 8 | (uint16_t)(chip8.mem[chip8.pc + 1]);
+        uint16_t op = get_current_op(&chip8);
         chip8.pc += 2;
 
         uint8_t op_code = (op >> 12) & 0xF;
@@ -127,43 +301,76 @@ int main(int argc, char **argv)
         case 0x0:
             if (op == 0x00e0)
             {
-                memset(chip8.display, 0, sizeof chip8.display);
+                clr(&chip8);
+            }
+            else if (op == 0x00ee)
+            {
+                running = ret(&chip8);
             }
             else
             {
-                fprintf(stderr, "unknown opcode %04x at pc %04x\n", op, chip8.pc - 2);
-                return 1;
+                running = RESULT_FAIL_UNKNOWN_OPCODE;
             }
             break;
         case 0x1:
-            if (chip8.pc - 2 == nnn)
-            {
-                running = 0;
-            }
-            else
-            {
-                chip8.pc = nnn;
-            }
+            running = jump(&chip8, nnn);
             break;
         case 0x6:
-            chip8.V[x] = nn;
+            assign(&chip8, x, nn);
             break;
         case 0x7:
-            chip8.V[x] += nn;
+            increment(&chip8, x, nn);
             break;
         case 0xa:
-            chip8.I = nnn;
+            set_image(&chip8, nnn);
             break;
         case 0xd:
             draw(&chip8, x, y, n);
             break;
+        case 0x2:
+            running = call(&chip8, nnn);
+            break;
+        case 0x3:
+            skip_next_eq_nn(&chip8, x, nn);
+            break;
+        case 0x4:
+            skip_next_neq_nn(&chip8, x, nn);
+            break;
+        case 0x5:
+            skip_next_eq_xy(&chip8, x, y);
+            break;
+        case 0x9:
+            skip_next_neq_xy(&chip8, x, y);
+            break;
+        case 0x8:
+            running = maths(&chip8, x, y, n);
+            break;
         default:
-            fprintf(stderr, "unknown opcode %04x at pc %04x\n", op, chip8.pc - 2);
-            return 1;
+            running = RESULT_FAIL_UNKNOWN_OPCODE;
+            break;
         }
     }
 
-    display(&chip8);
+    fprintf(stderr, "%02x\n", chip8.V[0]);
+    // display(&chip8);
     fclose(image_file);
-    return 0;
+
+    chip8.pc -= 2;
+    switch (running)
+    {
+    case RESULT_HALT:
+        return 0;
+    case RESULT_FAIL_UNKNOWN_OPCODE:
+        fprintf(stderr, "unknown opcode %04x at pc %04x\n", get_current_op(&chip8), chip8.pc);
+        return 1;
+    case RESULT_FAIL_EMPTY_STACK:
+        fprintf(stderr, "empty stack at pc %04x\n", chip8.pc);
+        return 1;
+    case RESULT_FAIL_STACK_OVERFLOW:
+        fprintf(stderr, "stack overflow at pc %04x\n", chip8.pc);
+        return 1;
+    default:
+        fprintf(stderr, "unknown result code %d, exiting with code 1\n", running);
+        return 1;
+    }
 }
