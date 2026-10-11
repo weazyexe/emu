@@ -7,6 +7,7 @@
 #define RESULT_FAIL_UNKNOWN_OPCODE -1
 #define RESULT_FAIL_EMPTY_STACK -2
 #define RESULT_FAIL_STACK_OVERFLOW -3
+#define RESULT_FAIL_MEMORY_OUT_OF_BOUNDS -4
 
 #define len(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -72,8 +73,13 @@ void set_image(struct chip8_t *chip8, uint16_t nnn)
     chip8->I = nnn;
 }
 
-void draw(struct chip8_t *chip8, uint8_t vx, uint8_t vy, uint8_t n)
+int draw(struct chip8_t *chip8, uint8_t vx, uint8_t vy, uint8_t n)
 {
+    if (chip8->I + n - 1 > 0xFFF)
+    {
+        return RESULT_FAIL_MEMORY_OUT_OF_BOUNDS;
+    }
+
     uint8_t x0 = chip8->V[vx] % 64;
     uint8_t y0 = chip8->V[vy] % 32;
     chip8->V[0xF] = 0;
@@ -97,6 +103,8 @@ void draw(struct chip8_t *chip8, uint8_t vx, uint8_t vy, uint8_t n)
             chip8->display[y][x] ^= bit;
         }
     }
+
+    return RESULT_OK;
 }
 
 int call(struct chip8_t *chip8, uint16_t nnn)
@@ -216,6 +224,40 @@ int maths(struct chip8_t *chip8, uint8_t x, uint8_t y, uint8_t n)
     return RESULT_OK;
 }
 
+int load_store(struct chip8_t *chip8, uint8_t x, uint16_t nn)
+{
+    switch (nn)
+    {
+    case 0x1e:
+        chip8->I += chip8->V[x];
+        break;
+    case 0x55:
+        if (chip8->I + x > 0xFFF)
+        {
+            return RESULT_FAIL_MEMORY_OUT_OF_BOUNDS;
+        }
+        for (int i = 0; i <= x; i++)
+        {
+            chip8->mem[chip8->I + i] = chip8->V[i]; // quirk
+        }
+        break;
+    case 0x65:
+        if (chip8->I + x > 0xFFF)
+        {
+            return RESULT_FAIL_MEMORY_OUT_OF_BOUNDS;
+        }
+        for (int i = 0; i <= x; i++)
+        {
+            chip8->V[i] = chip8->mem[chip8->I + i]; // quirk
+        }
+        break;
+
+    default:
+        return RESULT_FAIL_UNKNOWN_OPCODE;
+    }
+    return RESULT_OK;
+}
+
 void display(struct chip8_t *chip8)
 {
     for (int y = 0; y < 32; y++)
@@ -325,7 +367,7 @@ int main(int argc, char **argv)
             set_image(&chip8, nnn);
             break;
         case 0xd:
-            draw(&chip8, x, y, n);
+            running = draw(&chip8, x, y, n);
             break;
         case 0x2:
             running = call(&chip8, nnn);
@@ -345,14 +387,17 @@ int main(int argc, char **argv)
         case 0x8:
             running = maths(&chip8, x, y, n);
             break;
+        case 0xF:
+            running = load_store(&chip8, x, nn);
+            break;
         default:
             running = RESULT_FAIL_UNKNOWN_OPCODE;
             break;
         }
     }
 
-    fprintf(stderr, "%02x\n", chip8.V[0]);
-    // display(&chip8);
+    // fprintf(stderr, "%02x\n", chip8.V[0]);
+    display(&chip8);
     fclose(image_file);
 
     chip8.pc -= 2;
@@ -368,6 +413,9 @@ int main(int argc, char **argv)
         return 1;
     case RESULT_FAIL_STACK_OVERFLOW:
         fprintf(stderr, "stack overflow at pc %04x\n", chip8.pc);
+        return 1;
+    case RESULT_FAIL_MEMORY_OUT_OF_BOUNDS:
+        fprintf(stderr, "memory out of bounds at pc %04x\n", chip8.pc);
         return 1;
     default:
         fprintf(stderr, "unknown result code %d, exiting with code 1\n", running);
